@@ -1,0 +1,7 @@
+.drover/
+*.db
+*.db-wal
+*.db-shm
+src/drover
+src/bin/
+.DS_Store

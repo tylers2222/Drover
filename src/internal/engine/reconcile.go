@@ -29,6 +29,7 @@ func (e *Engine) reconcile(ctx context.Context) error {
 		e.orch.status = ""
 		e.log.Error("orchestrator pane not found", "pane", e.cfg.Orchestrator)
 	}
+	e.log.Debug("reconcile", "jobs", len(jobs), "live_panes", len(panes), "tracked", len(e.panes), "asks", len(e.asks), "orchestrator", e.orch.status)
 
 	var pending []store.Decision
 	loaded := false

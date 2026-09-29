@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -102,8 +103,12 @@ func cmdRun(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	stepTimeout := fs.Duration("step-timeout", recipe.DefaultStepTimeout, "step wait timeout when the recipe sets none")
 	readyTimeout := fs.Duration("ready-timeout", recipe.DefaultReadyTimeout, "spawn ready timeout when the recipe sets none")
 	tick := fs.Duration("tick", engine.DefaultSafetyTick, "safety interval to re-check decisions and panes")
+	debug := fs.Bool("debug", false, "log every herdr request, event and FSM step")
 	if _, err := parseArgs(fs, args, 0); err != nil {
 		return err
+	}
+	if *debug {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}
 	// The engine takes Config as given; nothing past this point repairs a bad value.
 	switch {

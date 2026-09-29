@@ -109,6 +109,7 @@ func (e *Engine) startJob(ctx context.Context, job *store.Job, rec *recipe.Recip
 	env[recipe.EnvJobID] = job.ID
 	env[recipe.EnvResult] = path
 
+	e.log.Debug("spawn", "job", job.ID, "workspace", rec.Spawn.Workspace, "cwd", rec.Spawn.CWD, "parent", e.cfg.ParentPane, "result", path)
 	var info herdr.PaneInfo
 	var err error
 	if rec.Spawn.Workspace {
@@ -119,6 +120,7 @@ func (e *Engine) startJob(ctx context.Context, job *store.Job, rec *recipe.Recip
 	if err != nil {
 		return e.retry(ctx, job, "spawn: "+err.Error())
 	}
+	e.log.Debug("spawned", "job", job.ID, "pane", info.PaneID, "workspace_id", info.WorkspaceID, "status", info.AgentStatus)
 
 	now := time.Now()
 	job.PaneID, job.WorkspaceID, job.ResultPath = info.PaneID, info.WorkspaceID, path
@@ -188,6 +190,7 @@ func (e *Engine) track(ctx context.Context, job *store.Job, rec *recipe.Recipe, 
 func (e *Engine) arm(ctx context.Context, f *paneFSM) error {
 	f.stamp()
 	o := f.current()
+	e.log.Debug("op write", "job", f.job.ID, "pane", f.job.PaneID, "op", o.label, "gen", f.gen)
 	if err := o.write(ctx); err != nil {
 		return e.abort(ctx, f, o.label+": "+err.Error())
 	}
@@ -197,6 +200,9 @@ func (e *Engine) arm(ctx context.Context, f *paneFSM) error {
 // await starts the current op's wait; kind none settles at once.
 func (e *Engine) await(ctx context.Context, f *paneFSM) error {
 	o := f.current()
+	e.log.Debug("op wait", "job", f.job.ID, "pane", f.job.PaneID, "op", o.label, "gen", f.gen,
+		"kind", o.wait.Kind, "status", o.wait.Status, "regex", o.wait.Regex, "settle", o.wait.Settle.Std(),
+		"timeout", o.timeout, "deadline", f.deadline, "pane_status", f.status)
 	switch o.wait.Kind {
 	case recipe.WaitNone:
 		return e.stepDone(ctx, f)
@@ -239,9 +245,12 @@ func (e *Engine) onPaneEvent(ctx context.Context, f *paneFSM, ev herdr.Event) er
 		return err
 	}
 	w := &f.current().wait
+	stale := !ev.ReceivedAt.IsZero() && ev.ReceivedAt.Before(f.armedAt)
+	e.log.Debug("pane status", "job", f.job.ID, "pane", f.job.PaneID, "op", f.current().label, "status", ev.AgentStatus,
+		"wait", w.Kind, "want", w.Status, "left", f.left, "stale", stale, "job_status", f.job.Status)
 	// Only a fresh arrival at the target settles the op. Anything else, including
 	// a status received before this op's write, stays a recorded event.
-	if w.Kind != recipe.WaitStatus || (!ev.ReceivedAt.IsZero() && ev.ReceivedAt.Before(f.armedAt)) {
+	if w.Kind != recipe.WaitStatus || stale {
 		return nil
 	}
 	switch {
@@ -271,8 +280,10 @@ func (e *Engine) syncBlocked(ctx context.Context, f *paneFSM) error {
 func (e *Engine) onSignal(ctx context.Context, sig signal) error {
 	f := e.panes[sig.pane]
 	if f == nil || f.gen != sig.gen {
+		e.log.Debug("stale signal", "pane", sig.pane, "gen", sig.gen, "tracked", f != nil, "err", sig.err)
 		return nil
 	}
+	e.log.Debug("signal", "job", f.job.ID, "pane", sig.pane, "op", f.current().label, "gen", sig.gen, "err", sig.err)
 	if sig.err != nil {
 		return e.abort(ctx, f, f.current().label+": wait output: "+sig.err.Error())
 	}
@@ -311,7 +322,10 @@ func (e *Engine) finish(ctx context.Context, f *paneFSM) error {
 		job.Error = rep.Error
 	}
 	if rep != nil {
+		e.log.Debug("report", "job", job.ID, "path", job.ResultPath, "status", rep.Status, "artifacts", len(rep.Artifacts))
 		e.record(ctx, job.ID, "result", rep)
+	} else {
+		e.log.Debug("report", "job", job.ID, "path", job.ResultPath, "err", err)
 	}
 	now := time.Now()
 	job.FinishedAt = &now
@@ -350,6 +364,7 @@ func (e *Engine) abort(ctx context.Context, f *paneFSM, reason string) error {
 
 // drop releases the FSM's slot; it must run before retry clears job.PaneID.
 func (e *Engine) drop(f *paneFSM) {
+	e.log.Debug("slot released", "job", f.job.ID, "pane", f.job.PaneID, "op", f.current().label)
 	delete(e.panes, f.job.PaneID)
 	f.cancel()
 	if f.timer != nil {

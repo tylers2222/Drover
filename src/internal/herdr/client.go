@@ -122,6 +122,7 @@ func (c *conn) stream(ctx context.Context, done func(), dec *json.Decoder, ch ch
 	for {
 		var ev Event
 		if err := dec.Decode(&ev); err != nil {
+			slog.Debug("herdr: stream ended", "err", err, "cancelled", ctx.Err() != nil)
 			if ctx.Err() == nil {
 				c.mu.Lock()
 				c.streamErr = fmt.Errorf("herdr: event stream: %w", err)
@@ -211,6 +212,19 @@ func (c *conn) bind(ctx context.Context) (context.Context, func()) {
 // exchange dials, sends one request and decodes its response into result. The
 // socket closes when ctx ends; the decoder is left positioned for events.
 func (c *conn) exchange(ctx context.Context, method string, params, result any) (*json.Decoder, error) {
+	id := strconv.FormatUint(c.seq.Add(1), 10)
+	start := time.Now()
+	slog.Debug("herdr: request", "req", id, "method", method, "params", params)
+	dec, err := c.roundTrip(ctx, id, method, params, result)
+	if err != nil {
+		slog.Debug("herdr: response", "req", id, "method", method, "took", time.Since(start), "err", err)
+		return nil, err
+	}
+	slog.Debug("herdr: response", "req", id, "method", method, "took", time.Since(start))
+	return dec, nil
+}
+
+func (c *conn) roundTrip(ctx context.Context, id, method string, params, result any) (*json.Decoder, error) {
 	var d net.Dialer
 	nc, err := d.DialContext(ctx, "unix", c.path)
 	if err != nil {
@@ -221,7 +235,7 @@ func (c *conn) exchange(ctx context.Context, method string, params, result any) 
 	if params == nil {
 		params = struct{}{}
 	}
-	req := request{ID: strconv.FormatUint(c.seq.Add(1), 10), Method: method, Params: params}
+	req := request{ID: id, Method: method, Params: params}
 	if err := json.NewEncoder(nc).Encode(req); err != nil {
 		return nil, err
 	}

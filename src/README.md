@@ -91,7 +91,7 @@ orchestrator pane (LLM, talks to the human)
 ## CLI
 
 ```
-drover run -orchestrator wJ:p1 [-slots 2] [-source ./pull.sh] [-db .drover/drover.db]
+drover run -orchestrator wJ:p1 [-slots 2] [-source ./pull.sh] [-db .drover/drover.db] [-debug]
 drover enqueue jobs.jsonl
 drover decide <id> recipe.json
 drover status | jobs [-status running] | events <job> | doctor

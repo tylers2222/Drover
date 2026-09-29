@@ -85,6 +85,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		case sig := <-e.signals:
 			err = e.onSignal(ctx, sig)
 		case <-tick.C:
+			e.log.Debug("tick", "busy", busy, "slots", e.cfg.Slots, "panes", len(e.panes), "asks", len(e.asks))
 			if err = e.checkDeadlines(ctx); err == nil {
 				err = e.sweep(ctx)
 			}
@@ -147,11 +148,14 @@ func (e *Engine) subscribe(ctx context.Context, base bool, subs ...herdr.Subscri
 
 func (e *Engine) onEvent(ctx context.Context, ev herdr.Event) error {
 	if ev.PaneID == e.cfg.Orchestrator {
+		e.log.Debug("event", "kind", ev.Kind, "pane", ev.PaneID, "status", ev.AgentStatus, "route", "orchestrator")
 		return e.onOrchestratorEvent(ctx, ev)
 	}
 	if f := e.panes[ev.PaneID]; f != nil {
+		e.log.Debug("event", "kind", ev.Kind, "pane", ev.PaneID, "status", ev.AgentStatus, "route", "job", "job", f.job.ID)
 		return e.onPaneEvent(ctx, f, ev)
 	}
+	e.log.Debug("event", "kind", ev.Kind, "pane", ev.PaneID, "status", ev.AgentStatus, "route", "ignored")
 	return nil
 }
 
@@ -168,6 +172,7 @@ func (e *Engine) fill(ctx context.Context) error {
 			return nil
 		}
 		if job == nil {
+			e.log.Debug("queue empty", "busy", e.busy(), "slots", e.cfg.Slots, "pulled", pulled, "source", e.cfg.Source != "")
 			if pulled || e.cfg.Source == "" || !e.pull(ctx) {
 				return nil
 			}
@@ -208,19 +213,24 @@ func (e *Engine) pull(ctx context.Context) bool {
 // validates) goes to the orchestrator and holds its slot while deciding.
 func (e *Engine) dispatch(ctx context.Context, job *store.Job) error {
 	raw := job.Recipe
+	source := "inline"
 	if raw == nil && job.Class != "" {
+		source = "class"
 		var err error
 		if raw, err = e.st.ClassRecipe(ctx, job.Class); err != nil {
 			e.log.Error("class recipe", "job", job.ID, "class", job.Class, "err", err)
 		}
 	}
 	if raw == nil {
+		e.log.Debug("dispatch", "job", job.ID, "class", job.Class, "recipe", "none")
 		return e.askOrchestrator(ctx, job, "")
 	}
 	rec, err := recipe.Parse(raw)
 	if err != nil {
+		e.log.Debug("dispatch", "job", job.ID, "class", job.Class, "recipe", source, "err", err)
 		return e.askOrchestrator(ctx, job, err.Error())
 	}
+	e.log.Debug("dispatch", "job", job.ID, "class", job.Class, "recipe", source, "steps", len(rec.Steps))
 	job.Recipe = raw
 	return e.startJob(ctx, job, rec)
 }
@@ -266,7 +276,9 @@ func (e *Engine) attemptLimit(job *store.Job) int {
 func (e *Engine) closePane(ctx context.Context, pane string) {
 	if err := e.conn.ClosePane(ctx, pane); err != nil && !herdr.IsCode(err, "pane_not_found") {
 		e.log.Warn("close pane", "pane", pane, "err", err)
+		return
 	}
+	e.log.Debug("pane closed", "pane", pane)
 }
 
 func (e *Engine) record(ctx context.Context, jobID, kind string, v any) {

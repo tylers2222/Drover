@@ -76,7 +76,11 @@ func (e *Engine) prompt(a *ask) string {
 // deliverPendingAsk prompts an available orchestrator that holds no ask with
 // the oldest open decision.
 func (e *Engine) deliverPendingAsk(ctx context.Context) {
+	if len(e.asks) == 0 {
+		return
+	}
 	if e.orch.inflight != "" || !e.orch.available() {
+		e.log.Debug("ask deferred", "asks", len(e.asks), "inflight", e.orch.inflight, "orchestrator", e.orch.status)
 		return
 	}
 	var next *ask
@@ -85,9 +89,7 @@ func (e *Engine) deliverPendingAsk(ctx context.Context) {
 			next = a
 		}
 	}
-	if next == nil {
-		return
-	}
+	e.log.Debug("asking", "job", next.job.ID, "decision", next.decision, "orchestrator", e.orch.status)
 	if _, err := e.conn.Prompt(ctx, e.cfg.Orchestrator, e.prompt(next)); err != nil {
 		e.log.Error("ask orchestrator", "job", next.job.ID, "decision", next.decision, "err", err)
 		return
@@ -115,6 +117,7 @@ func (e *Engine) checkDecisions(ctx context.Context) error {
 	for _, d := range answered {
 		a := e.asks[d.JobID]
 		e.forgetAsk(d.JobID)
+		e.log.Debug("decision answered", "job", d.JobID, "decision", d.ID, "bytes", len(d.Response))
 		rec, err := recipe.Parse(d.Response)
 		if err != nil {
 			e.log.Warn("recipe rejected", "job", d.JobID, "decision", d.ID, "err", err)
@@ -162,6 +165,7 @@ func (e *Engine) onOrchestratorEvent(ctx context.Context, ev herdr.Event) error 
 		return nil
 	case herdr.EventAgentStatusChanged:
 		e.orch.observe(ev.AgentStatus)
+		e.log.Debug("orchestrator status", "status", e.orch.status, "inflight", e.orch.inflight, "worked", e.orch.worked, "asks", len(e.asks))
 	default:
 		return nil
 	}

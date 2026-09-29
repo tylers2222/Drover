@@ -1,23 +1,27 @@
 package recipe
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"time"
 
 	"github.com/tylers2222/drover/internal/herdr"
+	"github.com/tylers2222/drover/internal/jsonx"
 )
 
-// Strict decode (unknown fields, trailing data rejected), then Validate: a spawn command, no
-// HERD_* env overrides, ≥1 step, valid send and wait per step, last step waits on a status.
-func parse(data []byte) (*Recipe, error) {
+// Parse strictly decodes (unknown fields, trailing data rejected), defaults a nil
+// Spawn.Ready to wait for idle, then validates: a spawn command, no EnvJobID or
+// EnvResult in spawn.env, ≥1 step, valid send and wait per step, last step waits on
+// a status.
+func Parse(data []byte) (*Recipe, error) {
 	var r Recipe
-	if err := decodeStrict(data, &r); err != nil {
+	if err := jsonx.DecodeStrict(data, &r); err != nil {
 		return nil, fmt.Errorf("decode recipe: %w", err)
+	}
+	if r.Spawn.Ready == nil {
+		r.Spawn.Ready = &Wait{Kind: WaitStatus, Status: herdr.StatusIdle}
 	}
 	if err := r.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid recipe: %w", err)
@@ -29,7 +33,7 @@ func (r *Recipe) Validate() error {
 	if r.Spawn.Command == "" {
 		return errors.New("spawn.command is required")
 	}
-	for _, k := range [...]string{"HERD_JOB_ID", "HERD_RESULT"} {
+	for _, k := range [...]string{EnvJobID, EnvResult} {
 		if _, ok := r.Spawn.Env[k]; ok {
 			return fmt.Errorf("spawn.env.%s is reserved: the engine injects it", k)
 		}
@@ -108,6 +112,9 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 
 // Accepts a Go duration string or a JSON integer of nanoseconds; null is a no-op.
 func (d *Duration) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
 	if len(b) > 0 && b[0] == '"' {
 		var s string
 		if err := json.Unmarshal(b, &s); err != nil {
@@ -120,23 +127,10 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 		*d = Duration(v)
 		return nil
 	}
-	n := int64(*d)
+	var n int64
 	if err := json.Unmarshal(b, &n); err != nil {
 		return fmt.Errorf("duration %s: want a string like \"30s\" or integer nanoseconds: %w", b, err)
 	}
 	*d = Duration(n)
-	return nil
-}
-
-// json.Unmarshal semantics plus DisallowUnknownFields: trailing data is an error.
-func decodeStrict(data []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return errors.New("unexpected data after the JSON value")
-	}
 	return nil
 }

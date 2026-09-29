@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,7 +23,6 @@ type conn struct {
 	path       string
 	callerPane string
 	seq        atomic.Uint64
-	dropped    atomic.Uint64
 	life       context.Context
 	stop       context.CancelFunc
 
@@ -112,12 +111,14 @@ func (c *conn) Subscribe(ctx context.Context, subs []Subscription) (<-chan Event
 	return ch, nil
 }
 
-// Sends never block: a full subscriber loses the event (see Dropped) so the
-// socket is always drained and herdr never waits on us.
+// Sends never block: a full subscriber loses the event so the socket is always
+// drained and herdr never waits on us. Losses are logged at powers of two, so a
+// stalled subscriber shows without flooding the log.
 func (c *conn) stream(ctx context.Context, done func(), dec *json.Decoder, ch chan<- Event) {
 	defer c.wg.Done()
 	defer close(ch)
 	defer done()
+	var dropped int
 	for {
 		var ev Event
 		if err := dec.Decode(&ev); err != nil {
@@ -136,16 +137,30 @@ func (c *conn) stream(ctx context.Context, done func(), dec *json.Decoder, ch ch
 		select {
 		case ch <- ev:
 		default:
-			c.dropped.Add(1)
+			dropped++
+			if dropped&(dropped-1) == 0 {
+				slog.Warn("herdr: subscriber full, dropping events", "event", ev.Kind, "pane", ev.PaneID, "dropped", dropped)
+			}
 		}
 	}
 }
 
-// Lifecycle kinds arrive as "pane_closed"; subscriptions name them "pane.closed".
-// pane.created/updated/moved nest the pane under data.pane.
+// Lifecycle events arrive as "pane_closed" (event.$defs.EventKind in
+// docs/herdr-api-schema.json); subscriptions name them "pane.closed"
+// (request.$defs.Subscription). Subscription events already arrive dotted
+// (subscription_event.$defs.SubscriptionEventKind). Unlisted kinds keep their
+// wire spelling.
+var subscriptionKinds = map[string]string{
+	"pane_closed":               EventPaneClosed,
+	"pane_exited":               EventPaneExited,
+	"pane_agent_detected":       EventAgentDetected,
+	"pane_agent_status_changed": EventAgentStatusChanged,
+}
+
+// pane_created/updated/moved nest the pane under data.pane.
 func lift(ev *Event) {
-	if !strings.Contains(ev.Kind, ".") {
-		ev.Kind = strings.Replace(ev.Kind, "_", ".", 1)
+	if k, ok := subscriptionKinds[ev.Kind]; ok {
+		ev.Kind = k
 	}
 	var d struct {
 		PaneID      string      `json:"pane_id"`
@@ -172,9 +187,6 @@ func (c *conn) Err() error {
 	}
 	return c.streamErr
 }
-
-// Dropped counts events discarded because a subscriber's buffer was full.
-func (c *conn) Dropped() uint64 { return c.dropped.Load() }
 
 // Returns once every in-flight Subscribe has finished and every channel is closed.
 func (c *conn) Close() error {

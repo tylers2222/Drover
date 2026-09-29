@@ -1,15 +1,15 @@
 package result
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
+
+	"github.com/tylers2222/drover/internal/jsonx"
 )
 
-func load(path, want string) (*Report, error) {
+// Load strictly decodes and validates the report at path; JobID must equal want.
+func Load(path, want string) (*Report, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("job %s wrote no report at %s: %w", want, path, os.ErrNotExist)
@@ -18,7 +18,7 @@ func load(path, want string) (*Report, error) {
 		return nil, fmt.Errorf("read report: %w", err)
 	}
 	var r Report
-	if err := decodeStrict(data, &r); err != nil {
+	if err := jsonx.DecodeStrict(data, &r); err != nil {
 		return nil, fmt.Errorf("report %s: %w", path, err)
 	}
 	if err := r.validate(want); err != nil {
@@ -43,19 +43,6 @@ func (r *Report) validate(want string) error {
 		}
 	default:
 		return fmt.Errorf("status %q: want success, failure or blocked", r.Status)
-	}
-	return nil
-}
-
-// json.Unmarshal semantics plus DisallowUnknownFields: trailing data is an error.
-func decodeStrict(data []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return errors.New("unexpected data after the JSON value")
 	}
 	return nil
 }

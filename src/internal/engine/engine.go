@@ -6,16 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/tylers2222/drover/internal/herdr"
 	"github.com/tylers2222/drover/internal/recipe"
 	"github.com/tylers2222/drover/internal/store"
 )
-
-const defaultSafetyTick = 30 * time.Second
 
 type Engine struct {
 	cfg  Config
@@ -29,10 +25,7 @@ type Engine struct {
 
 	panes map[string]*paneFSM // running and step-blocked jobs, by pane
 	asks  map[string]*ask     // deciding jobs, by job id
-
-	orchestratorStatus herdr.AgentStatus
-	inflight           string // job whose ask the orchestrator holds; at most one
-	inflightWorked     bool   // the orchestrator went working after that ask
+	orch  orchestrator
 }
 
 // A signal whose gen is not its FSM's current gen belongs to an earlier arm.
@@ -42,17 +35,7 @@ type signal struct {
 	err  error
 }
 
-func newEngine(cfg Config, conn herdr.Conn, st store.Store) *Engine {
-	cfg.Slots = max(cfg.Slots, 1)
-	if cfg.ReadyTimeout <= 0 {
-		cfg.ReadyTimeout = recipe.DefaultReadyTimeout
-	}
-	if cfg.StepTimeout <= 0 {
-		cfg.StepTimeout = recipe.DefaultStepTimeout
-	}
-	if cfg.SafetyTick <= 0 {
-		cfg.SafetyTick = defaultSafetyTick
-	}
+func New(cfg Config, conn herdr.Conn, st store.Store) *Engine {
 	return &Engine{
 		cfg:     cfg,
 		conn:    conn,
@@ -66,22 +49,17 @@ func newEngine(cfg Config, conn herdr.Conn, st store.Store) *Engine {
 	}
 }
 
-func (e *Engine) run(ctx context.Context) error {
+// Run blocks until ctx is cancelled, the socket dies, a job's store write
+// fails, or a sweep cannot read the store or the pane list. Safe to restart: it
+// reconciles the store against live panes before filling slots, which squares
+// whatever the failure left memory and store disagreeing on.
+func (e *Engine) Run(ctx context.Context) error {
 	if e.cfg.Orchestrator == "" {
 		return errors.New("engine: no orchestrator pane configured")
 	}
-	dir, err := filepath.Abs(e.cfg.ResultDir)
-	if err == nil {
-		err = os.MkdirAll(dir, 0o755)
-	}
-	if err != nil {
-		return fmt.Errorf("engine: result dir: %w", err)
-	}
-	e.cfg.ResultDir = dir
-
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	err = e.subscribe(ctx, true,
+	err := e.subscribe(ctx, true,
 		herdr.Subscription{Type: herdr.EventPaneClosed},
 		herdr.Subscription{Type: herdr.EventPaneExited},
 		herdr.Subscription{Type: herdr.EventAgentStatusChanged, PaneID: e.cfg.Orchestrator},
@@ -97,24 +75,28 @@ func (e *Engine) run(ctx context.Context) error {
 	defer tick.Stop()
 	for {
 		busy := e.busy()
+		var err error
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case err := <-e.dead:
-			return fmt.Errorf("engine: %w", err)
+		case err = <-e.dead:
 		case ev := <-e.events:
-			e.onEvent(ctx, ev)
+			err = e.onEvent(ctx, ev)
 		case sig := <-e.signals:
-			e.onSignal(ctx, sig)
+			err = e.onSignal(ctx, sig)
 		case <-tick.C:
-			e.checkDeadlines(ctx)
-			if err := e.sweep(ctx); err != nil {
-				e.log.Error("safety sweep", "err", err)
+			if err = e.checkDeadlines(ctx); err == nil {
+				err = e.sweep(ctx)
 			}
-			continue
+			// sweep has filled.
+			busy = e.busy()
 		}
-		if e.busy() < busy {
-			e.fill(ctx)
+		// Between ticks only a slot freed on net makes a new claim possible.
+		if err == nil && e.busy() < busy {
+			err = e.fill(ctx)
+		}
+		if err != nil {
+			return fmt.Errorf("engine: %w", err)
 		}
 	}
 }
@@ -125,10 +107,11 @@ func (e *Engine) sweep(ctx context.Context) error {
 	if err := e.reconcile(ctx); err != nil {
 		return err
 	}
-	e.checkDecisions(ctx)
+	if err := e.checkDecisions(ctx); err != nil {
+		return err
+	}
 	e.deliverPendingAsk(ctx)
-	e.fill(ctx)
-	return nil
+	return e.fill(ctx)
 }
 
 // herdr serves one subscription per connection and cannot extend it, so every
@@ -162,41 +145,47 @@ func (e *Engine) subscribe(ctx context.Context, base bool, subs ...herdr.Subscri
 	return nil
 }
 
-func (e *Engine) onEvent(ctx context.Context, ev herdr.Event) {
+func (e *Engine) onEvent(ctx context.Context, ev herdr.Event) error {
 	if ev.PaneID == e.cfg.Orchestrator {
-		e.onOrchestratorEvent(ctx, ev)
-		return
+		return e.onOrchestratorEvent(ctx, ev)
 	}
 	if f := e.panes[ev.PaneID]; f != nil {
-		e.onPaneEvent(ctx, f, ev)
+		return e.onPaneEvent(ctx, f, ev)
 	}
+	return nil
 }
 
 func (e *Engine) busy() int { return len(e.panes) + len(e.asks) }
 
 // fill claims queued jobs while slots are free, running Source at most once
 // when the queue is empty.
-func (e *Engine) fill(ctx context.Context) {
+func (e *Engine) fill(ctx context.Context) error {
 	pulled := false
 	for e.busy() < e.cfg.Slots {
 		job, err := e.st.Claim(ctx)
 		if err != nil {
 			e.log.Error("claim", "err", err)
-			return
+			return nil
 		}
 		if job == nil {
 			if pulled || e.cfg.Source == "" || !e.pull(ctx) {
-				return
+				return nil
 			}
 			pulled = true
 			continue
 		}
 		e.log.Info("job", "job", job.ID, "from", store.JobQueued, "to", job.Status)
+		busy := e.busy()
 		if err := e.dispatch(ctx, job); err != nil {
-			e.log.Error("dispatch", "job", job.ID, "err", err)
-			return
+			return err
+		}
+		// A failed start left its slot free; claiming again at once would spend
+		// the job's remaining attempts back to back.
+		if e.busy() == busy {
+			return nil
 		}
 	}
+	return nil
 }
 
 func (e *Engine) pull(ctx context.Context) bool {
@@ -236,13 +225,13 @@ func (e *Engine) dispatch(ctx context.Context, job *store.Job) error {
 	return e.startJob(ctx, job, rec)
 }
 
-// transition persists a status change along with whatever fields the caller set.
+// transition persists a status change along with whatever fields the caller
+// set. Its error ends Run: no side effect may follow a failed write.
 func (e *Engine) transition(ctx context.Context, job *store.Job, to store.JobStatus) error {
 	from := job.Status
 	job.Status = to
 	if err := e.st.Update(ctx, job); err != nil {
-		e.log.Error("persist job", "job", job.ID, "pane", job.PaneID, "from", from, "to", to, "err", err)
-		return err
+		return fmt.Errorf("persist job %s %s to %s: %w", job.ID, from, to, err)
 	}
 	args := []any{"job", job.ID, "pane", job.PaneID, "from", from, "to", to}
 	if job.Error != "" {
@@ -253,7 +242,7 @@ func (e *Engine) transition(ctx context.Context, job *store.Job, to store.JobSta
 }
 
 // retry ends a failed attempt: requeued while attempts remain, else failed.
-func (e *Engine) retry(ctx context.Context, job *store.Job, reason string) {
+func (e *Engine) retry(ctx context.Context, job *store.Job, reason string) error {
 	job.Attempts++
 	e.log.Warn("attempt failed", "job", job.ID, "pane", job.PaneID, "attempt", job.Attempts, "reason", reason)
 	job.PaneID, job.WorkspaceID, job.Step, job.Error, job.FinishedAt = "", "", 0, reason, nil
@@ -263,7 +252,7 @@ func (e *Engine) retry(ctx context.Context, job *store.Job, reason string) {
 		now := time.Now()
 		job.FinishedAt = &now
 	}
-	e.transition(ctx, job, to)
+	return e.transition(ctx, job, to)
 }
 
 // Config.MaxAttempts caps each job's own limit; 0 means no cap.

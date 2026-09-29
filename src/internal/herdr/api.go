@@ -58,22 +58,15 @@ const (
 	EventAgentDetected      = "pane.agent_detected"
 )
 
-// PaneID and AgentStatus are lifted out of Data when present.
+// Kind is one of the Event* names above, or herdr's wire kind for events this
+// package does not name. PaneID and AgentStatus are lifted out of Data when
+// present.
 type Event struct {
 	Kind        string          `json:"event"`
 	PaneID      string          `json:"-"`
 	AgentStatus AgentStatus     `json:"-"`
 	Data        json.RawMessage `json:"data"`
 	ReceivedAt  time.Time       `json:"-"`
-}
-
-// One Client owns one socket. Call is concurrency-safe. The Subscribe channel
-// closes when ctx ends or the connection drops; Err then holds the cause.
-type Client interface {
-	Call(ctx context.Context, method string, params any, result any) error
-	Subscribe(ctx context.Context, subs []Subscription) (<-chan Event, error)
-	Err() error
-	Close() error
 }
 
 // Direction is required by herdr: "right" | "down".
@@ -93,29 +86,24 @@ type WorkspaceCreateParams struct {
 	Focus bool              `json:"focus"`
 }
 
-type PromptWait struct {
-	Until     []AgentStatus `json:"until,omitempty"`
-	TimeoutMS int64         `json:"timeout_ms,omitempty"`
-}
+// One Conn owns one socket; every method is safe for concurrent use. The
+// Subscribe channel closes when ctx ends or the connection drops; Err then
+// holds the cause.
+type Conn interface {
+	Call(ctx context.Context, method string, params any, result any) error
+	Subscribe(ctx context.Context, subs []Subscription) (<-chan Event, error)
+	Err() error
+	Close() error
 
-// One herdr request per method; mapping in ops.go.
-type Ops interface {
+	// One herdr request per method; mapping in ops.go.
 	SplitPane(ctx context.Context, p SplitParams) (PaneInfo, error)
 	CreateWorkspace(ctx context.Context, p WorkspaceCreateParams) (PaneInfo, error)
 	RunCommand(ctx context.Context, paneID, command string) error
 	SendText(ctx context.Context, paneID, text string) error
 	SendKeys(ctx context.Context, paneID string, keys []string) error
-	Prompt(ctx context.Context, target, text string, wait *PromptWait) (PaneInfo, error)
-	WaitAgent(ctx context.Context, target string, until []AgentStatus, timeout time.Duration) (PaneInfo, error)
+	Prompt(ctx context.Context, target, text string) (PaneInfo, error)
 	WaitOutput(ctx context.Context, paneID, regex string, timeout time.Duration) (string, error)
-	ReadPane(ctx context.Context, paneID string, lines int) (string, error)
 	ClosePane(ctx context.Context, paneID string) error
 	ListPanes(ctx context.Context, workspaceID string) ([]PaneInfo, error)
-	GetPane(ctx context.Context, paneID string) (PaneInfo, error)
 	CurrentPane(ctx context.Context) (PaneInfo, error)
-}
-
-type Conn interface {
-	Client
-	Ops
 }

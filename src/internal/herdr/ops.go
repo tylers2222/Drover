@@ -72,26 +72,12 @@ func (c *conn) SendKeys(ctx context.Context, paneID string, keys []string) error
 	}{paneID, keys}, nil)
 }
 
-func (c *conn) Prompt(ctx context.Context, target, text string, wait *PromptWait) (PaneInfo, error) {
+func (c *conn) Prompt(ctx context.Context, target, text string) (PaneInfo, error) {
 	var r agentResult
 	err := c.Call(ctx, "agent.prompt", struct {
-		Target string      `json:"target"`
-		Text   string      `json:"text"`
-		Wait   *PromptWait `json:"wait,omitempty"`
-	}{target, text, wait}, &r)
-	if err != nil {
-		return PaneInfo{}, err
-	}
-	return r.Agent, nil
-}
-
-func (c *conn) WaitAgent(ctx context.Context, target string, until []AgentStatus, timeout time.Duration) (PaneInfo, error) {
-	var r agentResult
-	err := c.Call(ctx, "agent.wait", struct {
-		Target    string        `json:"target"`
-		Until     []AgentStatus `json:"until,omitempty"`
-		TimeoutMS int64         `json:"timeout_ms,omitempty"`
-	}{target, until, millis(timeout)}, &r)
+		Target string `json:"target"`
+		Text   string `json:"text"`
+	}{target, text}, &r)
 	if err != nil {
 		return PaneInfo{}, err
 	}
@@ -114,24 +100,6 @@ func (c *conn) WaitOutput(ctx context.Context, paneID, regex string, timeout tim
 	return r.MatchedLine, nil
 }
 
-func (c *conn) ReadPane(ctx context.Context, paneID string, lines int) (string, error) {
-	var r struct {
-		Read struct {
-			Text string `json:"text"`
-		} `json:"read"`
-	}
-	err := c.Call(ctx, "pane.read", struct {
-		PaneID string `json:"pane_id"`
-		Source string `json:"source"`
-		Format string `json:"format"`
-		Lines  int    `json:"lines,omitempty"`
-	}{paneID, sourceRecentUnwrapped, "text", lines}, &r)
-	if err != nil {
-		return "", err
-	}
-	return r.Read.Text, nil
-}
-
 func (c *conn) ClosePane(ctx context.Context, paneID string) error {
 	return c.Call(ctx, "pane.close", paneTarget{paneID}, nil)
 }
@@ -147,14 +115,6 @@ func (c *conn) ListPanes(ctx context.Context, workspaceID string) ([]PaneInfo, e
 		return nil, err
 	}
 	return r.Panes, nil
-}
-
-func (c *conn) GetPane(ctx context.Context, paneID string) (PaneInfo, error) {
-	var r paneResult
-	if err := c.Call(ctx, "pane.get", paneTarget{paneID}, &r); err != nil {
-		return PaneInfo{}, err
-	}
-	return r.Pane, nil
 }
 
 // Like `herdr pane current`: the pane we run in when known, else herdr's choice.

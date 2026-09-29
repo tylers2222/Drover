@@ -11,13 +11,11 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/tylers2222/drover/internal/jsonx"
 	"github.com/tylers2222/drover/internal/store"
 )
 
-const (
-	sourceTimeout      = 60 * time.Second
-	defaultMaxAttempts = 2
-)
+const sourceTimeout = 60 * time.Second
 
 type jobLine struct {
 	ID          string          `json:"id"`
@@ -50,7 +48,7 @@ func (e *Engine) pullSource(ctx context.Context) ([]store.Job, error) {
 }
 
 // ParseJobs reads `drover enqueue` JSONL, one job per line, blank lines skipped.
-// A missing id is left empty for store.Enqueue to generate.
+// A missing id or max_attempts is left zero for store.Enqueue to default.
 func ParseJobs(r io.Reader) ([]store.Job, error) {
 	var jobs []store.Job
 	br := bufio.NewReader(r)
@@ -74,19 +72,11 @@ func ParseJobs(r io.Reader) ([]store.Job, error) {
 
 func parseJob(line []byte) (store.Job, error) {
 	var l jobLine
-	dec := json.NewDecoder(bytes.NewReader(line))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&l); err != nil {
+	if err := jsonx.DecodeStrict(line, &l); err != nil {
 		return store.Job{}, err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return store.Job{}, errors.New("unexpected data after the JSON value")
 	}
 	if l.MaxAttempts < 0 {
 		return store.Job{}, fmt.Errorf("max_attempts %d is negative", l.MaxAttempts)
-	}
-	if l.MaxAttempts == 0 {
-		l.MaxAttempts = defaultMaxAttempts
 	}
 	return store.Job{
 		ID:          l.ID,
@@ -94,6 +84,5 @@ func parseJob(line []byte) (store.Job, error) {
 		Title:       l.Title,
 		Spec:        l.Spec,
 		MaxAttempts: l.MaxAttempts,
-		Status:      store.JobQueued,
 	}, nil
 }

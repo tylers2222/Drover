@@ -111,6 +111,7 @@ internal/herdr      socket client (api.go is the contract)
 internal/store      SQLite store (types.go is the contract)
 internal/recipe     recipe types + validation
 internal/result     child report + validation
+internal/jsonx      strict JSON decoding shared by the contracts
 internal/engine     the loop: slots, FSM, reconcile, decide, source
 docs/               herdr API schema snapshot
 ```

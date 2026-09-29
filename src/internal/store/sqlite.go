@@ -32,7 +32,7 @@ type sqliteStore struct {
 	db *sql.DB
 }
 
-func open(path string) (Store, error) {
+func Open(path string) (Store, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("open store %s: %w", path, err)
@@ -46,7 +46,7 @@ func open(path string) (Store, error) {
 
 func (s *sqliteStore) Close() error { return s.db.Close() }
 
-// Defaults (ID, status, max attempts, timestamps) are written back into jobs.
+// Sole owner of job defaults (ID, status, max attempts, timestamps); they are written back into jobs.
 func (s *sqliteStore) Enqueue(ctx context.Context, jobs []Job) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -71,7 +71,7 @@ func (s *sqliteStore) Enqueue(ctx context.Context, jobs []Job) error {
 			j.Status = JobQueued
 		}
 		if j.MaxAttempts == 0 {
-			j.MaxAttempts = 2
+			j.MaxAttempts = DefaultMaxAttempts
 		}
 		if j.CreatedAt.IsZero() {
 			j.CreatedAt = now
@@ -220,12 +220,21 @@ func (s *sqliteStore) AnswerDecision(ctx context.Context, id int64, response jso
 	return nil
 }
 
-func (s *sqliteStore) GetDecision(ctx context.Context, id int64) (*Decision, error) {
-	var d Decision
-	if err := scanDecision(s.db.QueryRowContext(ctx, "SELECT "+decisionCols+" FROM decisions WHERE id = ?", id), &d); err != nil {
-		return nil, fmt.Errorf("get decision %d: %w", id, notFound(err))
+// The answered subset of ids, by id: unknown and still-pending ids are omitted.
+func (s *sqliteStore) AnsweredDecisions(ctx context.Context, ids []int64) ([]Decision, error) {
+	if len(ids) == 0 {
+		return nil, nil
 	}
-	return &d, nil
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	q := "SELECT " + decisionCols + " FROM decisions WHERE id IN (?" + strings.Repeat(", ?", len(ids)-1) + ") AND response IS NOT NULL ORDER BY id"
+	ds, err := queryAll(ctx, s.db, scanDecision, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("answered decisions: %w", err)
+	}
+	return ds, nil
 }
 
 // Unanswered only (response IS NULL), oldest first.

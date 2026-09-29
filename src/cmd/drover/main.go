@@ -97,16 +97,26 @@ func cmdRun(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	parent := fs.String("parent", "", "pane `id` that job panes split beside (default -orchestrator)")
 	source := fs.String("source", "", "`command` (sh -c) that prints job JSONL when the queue is empty")
 	results := fs.String("results", ".drover/results", "result report `dir`")
-	slots := fs.Int("slots", 2, "concurrent job panes")
+	slots := fs.Int("slots", engine.DefaultSlots, "concurrent job panes")
 	maxAttempts := fs.Int("max-attempts", 0, "cap on attempts per job; 0 = each job's max_attempts")
 	stepTimeout := fs.Duration("step-timeout", recipe.DefaultStepTimeout, "step wait timeout when the recipe sets none")
 	readyTimeout := fs.Duration("ready-timeout", recipe.DefaultReadyTimeout, "spawn ready timeout when the recipe sets none")
-	tick := fs.Duration("tick", 30*time.Second, "safety interval to re-check decisions and panes")
+	tick := fs.Duration("tick", engine.DefaultSafetyTick, "safety interval to re-check decisions and panes")
 	if _, err := parseArgs(fs, args, 0); err != nil {
 		return err
 	}
-	if *orch == "" {
+	// The engine takes Config as given; nothing past this point repairs a bad value.
+	switch {
+	case *orch == "":
 		return badUsage(fs, "-orchestrator is required")
+	case *slots < 1:
+		return badUsage(fs, "-slots must be at least 1, got %d", *slots)
+	case *stepTimeout <= 0:
+		return badUsage(fs, "-step-timeout must be positive, got %v", *stepTimeout)
+	case *readyTimeout <= 0:
+		return badUsage(fs, "-ready-timeout must be positive, got %v", *readyTimeout)
+	case *tick <= 0:
+		return badUsage(fs, "-tick must be positive, got %v", *tick)
 	}
 	if *parent == "" {
 		*parent = *orch

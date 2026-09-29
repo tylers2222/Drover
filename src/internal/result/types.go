@@ -18,6 +18,3 @@ type Report struct {
 	Error     string   `json:"error,omitempty"`
 	Question  string   `json:"question,omitempty"`
 }
-
-// Load reads and validates; JobID must equal want. Implemented in result.go.
-func Load(path, want string) (*Report, error) { return load(path, want) }

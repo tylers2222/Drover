@@ -8,14 +8,21 @@ import (
 	"github.com/tylers2222/drover/internal/herdr"
 )
 
-// Engine always injects HERD_JOB_ID and HERD_RESULT into Spawn.Env.
+// Child env: its job id, and the path it writes its result.Report to.
+const (
+	EnvJobID  = "HERD_JOB_ID"
+	EnvResult = "HERD_RESULT"
+)
+
+// Engine always injects EnvJobID and EnvResult into Spawn.Env.
 type Recipe struct {
 	Class string `json:"class,omitempty"`
 	Spawn Spawn  `json:"spawn"`
 	Steps []Step `json:"steps"`
 }
 
-// Workspace=false splits beside the engine's parent pane. Ready nil = wait for idle.
+// Workspace=false splits beside the engine's parent pane. Ready nil in JSON = wait
+// for idle; never nil after Parse.
 type Spawn struct {
 	Command   string            `json:"command"`
 	CWD       string            `json:"cwd,omitempty"`
@@ -69,6 +76,3 @@ const (
 	DefaultStepTimeout  = 30 * time.Minute
 	DefaultSettle       = 500 * time.Millisecond
 )
-
-// Parse decodes and validates; rules documented on parse in recipe.go.
-func Parse(data []byte) (*Recipe, error) { return parse(data) }

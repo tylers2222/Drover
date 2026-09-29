@@ -21,8 +21,12 @@ const (
 	JobRejected JobStatus = "rejected"
 )
 
+// Applied by Enqueue to a job whose MaxAttempts is 0.
+const DefaultMaxAttempts = 2
+
 // Spec is the caller's ticket payload, opaque to the engine. Recipe is nil
-// until decided. Step is the index of the step currently executing.
+// until decided. Step is the index of the step currently executing: 0 is the
+// spawn command, recipe steps are 1..N.
 type Job struct {
 	ID          string          `json:"id"`
 	Class       string          `json:"class,omitempty"`
@@ -75,7 +79,7 @@ type Store interface {
 	CreateDecision(ctx context.Context, jobID, question string) (*Decision, error)
 	MarkAsked(ctx context.Context, id int64) error
 	AnswerDecision(ctx context.Context, id int64, response json.RawMessage) error
-	GetDecision(ctx context.Context, id int64) (*Decision, error)
+	AnsweredDecisions(ctx context.Context, ids []int64) ([]Decision, error)
 	PendingDecisions(ctx context.Context) ([]Decision, error)
 
 	ClassRecipe(ctx context.Context, class string) (json.RawMessage, error)
@@ -86,5 +90,3 @@ type Store interface {
 
 	Close() error
 }
-
-func Open(path string) (Store, error) { return open(path) }

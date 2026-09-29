@@ -16,7 +16,25 @@ type ask struct {
 	job      *store.Job
 	decision int64
 	question string
-	asked    bool
+}
+
+// orchestrator is what the engine knows of the orchestrator pane. It holds at
+// most one ask; every other ask is unasked.
+type orchestrator struct {
+	status   herdr.AgentStatus // "" while its pane is missing
+	inflight string            // job whose ask it holds
+	worked   bool              // it went working after that ask
+}
+
+func (o *orchestrator) observe(s herdr.AgentStatus) {
+	if s == herdr.StatusWorking && o.inflight != "" {
+		o.worked = true
+	}
+	o.status = s
+}
+
+func (o *orchestrator) available() bool {
+	return o.status == herdr.StatusIdle || o.status == herdr.StatusDone
 }
 
 // rejected, when set, is why the job's previous recipe failed validation.
@@ -24,7 +42,7 @@ func (e *Engine) askOrchestrator(ctx context.Context, job *store.Job, rejected s
 	q := question(job, rejected)
 	d, err := e.st.CreateDecision(ctx, job.ID, q)
 	if err != nil {
-		return fmt.Errorf("create decision: %w", err)
+		return fmt.Errorf("create decision for job %s: %w", job.ID, err)
 	}
 	e.asks[job.ID] = &ask{job: job, decision: d.ID, question: q}
 	e.log.Info("decision opened", "job", job.ID, "decision", d.ID, "class", job.Class)
@@ -55,52 +73,54 @@ func (e *Engine) prompt(a *ask) string {
 	return p
 }
 
-// deliverPendingAsk prompts an available orchestrator with the oldest unasked
-// decision. Only one ask is ever in flight.
+// deliverPendingAsk prompts an available orchestrator that holds no ask with
+// the oldest open decision.
 func (e *Engine) deliverPendingAsk(ctx context.Context) {
-	if e.inflight != "" || !available(e.orchestratorStatus) {
+	if e.orch.inflight != "" || !e.orch.available() {
 		return
 	}
 	var next *ask
 	for _, a := range e.asks {
-		if !a.asked && (next == nil || a.decision < next.decision) {
+		if next == nil || a.decision < next.decision {
 			next = a
 		}
 	}
 	if next == nil {
 		return
 	}
-	if _, err := e.conn.Prompt(ctx, e.cfg.Orchestrator, e.prompt(next), nil); err != nil {
+	if _, err := e.conn.Prompt(ctx, e.cfg.Orchestrator, e.prompt(next)); err != nil {
 		e.log.Error("ask orchestrator", "job", next.job.ID, "decision", next.decision, "err", err)
 		return
 	}
 	if err := e.st.MarkAsked(ctx, next.decision); err != nil {
 		e.log.Error("mark asked", "decision", next.decision, "err", err)
 	}
-	next.asked = true
-	e.inflight, e.inflightWorked = next.job.ID, false
+	e.orch.inflight, e.orch.worked = next.job.ID, false
 	e.log.Info("orchestrator asked", "job", next.job.ID, "decision", next.decision)
 }
 
 // checkDecisions consumes answers: a valid recipe becomes its class's recipe and
 // starts the job; an invalid one is re-asked with the validation error.
-func (e *Engine) checkDecisions(ctx context.Context) {
-	for id, a := range e.asks {
-		d, err := e.st.GetDecision(ctx, a.decision)
-		if err != nil {
-			e.log.Error("get decision", "job", id, "decision", a.decision, "err", err)
-			continue
-		}
-		if d.Response == nil {
-			continue
-		}
-		e.forgetAsk(id)
+func (e *Engine) checkDecisions(ctx context.Context) error {
+	ids := make([]int64, 0, len(e.asks))
+	for _, a := range e.asks {
+		ids = append(ids, a.decision)
+	}
+	answered, err := e.st.AnsweredDecisions(ctx, ids)
+	if err != nil {
+		e.log.Error("answered decisions", "err", err)
+		return nil
+	}
+	// Each job has one ask, and acting on an answer touches only its own.
+	for _, d := range answered {
+		a := e.asks[d.JobID]
+		e.forgetAsk(d.JobID)
 		rec, err := recipe.Parse(d.Response)
 		if err != nil {
-			e.log.Warn("recipe rejected", "job", id, "decision", d.ID, "err", err)
-			e.record(ctx, id, "recipe_rejected", map[string]any{"decision": d.ID, "error": err.Error()})
-			if err := e.askOrchestrator(ctx, a.job, err.Error()); err != nil {
-				e.log.Error("re-ask", "job", id, "err", err)
+			e.log.Warn("recipe rejected", "job", d.JobID, "decision", d.ID, "err", err)
+			e.record(ctx, d.JobID, "recipe_rejected", map[string]any{"decision": d.ID, "error": err.Error()})
+			if err = e.askOrchestrator(ctx, a.job, err.Error()); err != nil {
+				return err
 			}
 			continue
 		}
@@ -111,14 +131,15 @@ func (e *Engine) checkDecisions(ctx context.Context) {
 			}
 		}
 		if err := e.startJob(ctx, a.job, rec); err != nil {
-			e.log.Error("start job", "job", id, "err", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // redecide re-attaches a deciding job to its open decision after a restart, or
 // dispatches it afresh. Pending is oldest first, so the last match is newest.
-func (e *Engine) redecide(ctx context.Context, job *store.Job, pending []store.Decision) {
+func (e *Engine) redecide(ctx context.Context, job *store.Job, pending []store.Decision) error {
 	var open *store.Decision
 	for i := range pending {
 		if pending[i].JobID == job.ID {
@@ -126,55 +147,42 @@ func (e *Engine) redecide(ctx context.Context, job *store.Job, pending []store.D
 		}
 	}
 	if open == nil {
-		if err := e.dispatch(ctx, job); err != nil {
-			e.log.Error("dispatch", "job", job.ID, "err", err)
-		}
-		return
+		return e.dispatch(ctx, job)
 	}
 	e.asks[job.ID] = &ask{job: job, decision: open.ID, question: open.Question}
 	e.log.Info("decision restored", "job", job.ID, "decision", open.ID)
+	return nil
 }
 
-func (e *Engine) onOrchestratorEvent(ctx context.Context, ev herdr.Event) {
+func (e *Engine) onOrchestratorEvent(ctx context.Context, ev herdr.Event) error {
 	switch ev.Kind {
 	case herdr.EventPaneClosed, herdr.EventPaneExited:
-		e.orchestratorStatus = ""
+		e.orch.status = ""
 		e.log.Error("orchestrator pane gone; decisions stall", "pane", ev.PaneID, "event", ev.Kind)
-		return
+		return nil
 	case herdr.EventAgentStatusChanged:
-		e.observeOrchestrator(ev.AgentStatus)
+		e.orch.observe(ev.AgentStatus)
 	default:
-		return
+		return nil
 	}
-	if !available(ev.AgentStatus) {
-		return
+	if !e.orch.available() {
+		return nil
 	}
-	e.checkDecisions(ctx)
-	if e.inflight != "" && e.inflightWorked {
+	if err := e.checkDecisions(ctx); err != nil {
+		return err
+	}
+	if e.orch.inflight != "" && e.orch.worked {
 		// It worked a turn and ended it without answering: ask again.
-		if a := e.asks[e.inflight]; a != nil {
-			a.asked = false
-		}
-		e.log.Warn("orchestrator ended a turn without answering", "job", e.inflight)
-		e.inflight = ""
+		e.log.Warn("orchestrator ended a turn without answering", "job", e.orch.inflight)
+		e.orch.inflight = ""
 	}
 	e.deliverPendingAsk(ctx)
-}
-
-func (e *Engine) observeOrchestrator(s herdr.AgentStatus) {
-	if s == herdr.StatusWorking && e.inflight != "" {
-		e.inflightWorked = true
-	}
-	e.orchestratorStatus = s
-}
-
-func available(s herdr.AgentStatus) bool {
-	return s == herdr.StatusIdle || s == herdr.StatusDone
+	return nil
 }
 
 func (e *Engine) forgetAsk(jobID string) {
 	delete(e.asks, jobID)
-	if e.inflight == jobID {
-		e.inflight = ""
+	if e.orch.inflight == jobID {
+		e.orch.inflight = ""
 	}
 }

@@ -24,17 +24,17 @@ func (e *Engine) reconcile(ctx context.Context) error {
 		live[p.PaneID] = p
 	}
 	if p, ok := live[e.cfg.Orchestrator]; ok {
-		e.observeOrchestrator(p.AgentStatus)
+		e.orch.observe(p.AgentStatus)
 	} else {
-		e.orchestratorStatus = ""
+		e.orch.status = ""
 		e.log.Error("orchestrator pane not found", "pane", e.cfg.Orchestrator)
 	}
 
 	var pending []store.Decision
 	loaded := false
 	active := make(map[string]bool, len(jobs))
-	for _, j := range jobs {
-		job := &j
+	for i := range jobs {
+		job := &jobs[i]
 		active[job.ID] = true
 		if job.Status == store.JobDeciding {
 			if e.asks[job.ID] != nil {
@@ -46,7 +46,9 @@ func (e *Engine) reconcile(ctx context.Context) error {
 				}
 				loaded = true
 			}
-			e.redecide(ctx, job, pending)
+			if err := e.redecide(ctx, job, pending); err != nil {
+				return err
+			}
 			continue
 		}
 		f := e.panes[job.PaneID]
@@ -57,15 +59,19 @@ func (e *Engine) reconcile(ctx context.Context) error {
 				job = f.job
 				e.drop(f)
 			}
-			e.retry(ctx, job, "pane gone")
+			if err := e.retry(ctx, job, "pane gone"); err != nil {
+				return err
+			}
 		case f == nil && job.FinishedAt == nil:
-			e.resume(ctx, job, p)
+			if err := e.resume(ctx, job, p); err != nil {
+				return err
+			}
 		}
 	}
 
 	for _, f := range e.panes {
 		if !active[f.job.ID] {
-			e.log.Warn("job moved on outside the engine; releasing its slot", "job", f.job.ID, "pane", f.pane)
+			e.log.Warn("job moved on outside the engine; releasing its slot", "job", f.job.ID, "pane", f.job.PaneID)
 			e.drop(f)
 		}
 	}

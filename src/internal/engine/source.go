@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tylers2222/drover/internal/jsonx"
+	"github.com/tylers2222/drover/internal/recipe"
 	"github.com/tylers2222/drover/internal/store"
 )
 
@@ -23,6 +24,7 @@ type jobLine struct {
 	Title       string          `json:"title"`
 	Spec        json.RawMessage `json:"spec"`
 	MaxAttempts int             `json:"max_attempts"`
+	Recipe      json.RawMessage `json:"recipe"`
 }
 
 func (e *Engine) pullSource(ctx context.Context) ([]store.Job, error) {
@@ -48,7 +50,9 @@ func (e *Engine) pullSource(ctx context.Context) ([]store.Job, error) {
 }
 
 // ParseJobs reads `drover enqueue` JSONL, one job per line, blank lines skipped.
-// A missing id or max_attempts is left zero for store.Enqueue to default.
+// A missing id or max_attempts is left zero for store.Enqueue to default. An
+// inline recipe must pass recipe.Parse; dispatch then runs it without asking
+// the orchestrator.
 func ParseJobs(r io.Reader) ([]store.Job, error) {
 	var jobs []store.Job
 	br := bufio.NewReader(r)
@@ -78,11 +82,19 @@ func parseJob(line []byte) (store.Job, error) {
 	if l.MaxAttempts < 0 {
 		return store.Job{}, fmt.Errorf("max_attempts %d is negative", l.MaxAttempts)
 	}
+	var raw json.RawMessage
+	if len(l.Recipe) > 0 && !bytes.Equal(l.Recipe, []byte("null")) {
+		if _, err := recipe.Parse(l.Recipe); err != nil {
+			return store.Job{}, fmt.Errorf("recipe: %w", err)
+		}
+		raw = l.Recipe
+	}
 	return store.Job{
 		ID:          l.ID,
 		Class:       l.Class,
 		Title:       l.Title,
 		Spec:        l.Spec,
+		Recipe:      raw,
 		MaxAttempts: l.MaxAttempts,
 	}, nil
 }

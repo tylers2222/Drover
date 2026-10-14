@@ -24,6 +24,7 @@ import (
 type op struct {
 	label   string
 	write   func(ctx context.Context) error
+	ask     bool // the write submits a prompt, so it must be seen to start a turn
 	wait    recipe.Wait
 	timeout time.Duration
 }
@@ -42,6 +43,24 @@ type paneFSM struct {
 	armedAt  time.Time
 	deadline time.Time
 	timer    *time.Timer
+	submit   *submitCheck // from an ask's write until a fresh busy status shows the turn started
+}
+
+// herdr can report an agent idle before its input accepts Enter, so an ask's
+// prompt can sit typed but unsent until the step times out. Each window without
+// a busy status resends Enter; maxSubmitResends of them fail the attempt.
+type submitCheck struct {
+	resends int
+	timer   *time.Timer
+}
+
+const maxSubmitResends = 3
+
+func (f *paneFSM) stopSubmitCheck() {
+	if f.submit != nil {
+		f.submit.timer.Stop()
+		f.submit = nil
+	}
 }
 
 func (f *paneFSM) current() *op { return &f.ops[f.job.Step] }
@@ -54,6 +73,7 @@ func (f *paneFSM) stamp() {
 		f.timer.Stop()
 		f.timer = nil
 	}
+	f.stopSubmitCheck()
 	f.armedAt = time.Now()
 	f.deadline = f.armedAt.Add(f.current().timeout)
 }
@@ -71,6 +91,7 @@ func (e *Engine) compile(rec *recipe.Recipe, pane string) []op {
 		ops = append(ops, op{
 			label:   "step " + strconv.Itoa(i+1),
 			write:   func(ctx context.Context) error { return e.send(ctx, pane, s) },
+			ask:     s.Send == recipe.SendAsk && !strings.HasPrefix(s.Text, "/"), // a slash command never leaves idle
 			wait:    s.Wait,
 			timeout: timeoutOr(s.Wait, e.cfg.StepTimeout),
 		})
@@ -194,7 +215,32 @@ func (e *Engine) arm(ctx context.Context, f *paneFSM) error {
 	if err := o.write(ctx); err != nil {
 		return e.abort(ctx, f, o.label+": "+err.Error())
 	}
+	if o.ask {
+		f.submit = &submitCheck{}
+		e.scheduleSubmitCheck(f)
+	}
 	return e.await(ctx, f)
+}
+
+func (e *Engine) scheduleSubmitCheck(f *paneFSM) {
+	sig := signal{pane: f.job.PaneID, gen: f.gen, submit: true}
+	f.submit.timer = time.AfterFunc(e.cfg.SubmitCheck, func() { e.post(f.ctx, sig) })
+}
+
+// checkSubmit runs when a window passes with no busy status since the ask.
+func (e *Engine) checkSubmit(ctx context.Context, f *paneFSM) error {
+	label := f.current().label
+	if f.submit.resends == maxSubmitResends {
+		return e.abort(ctx, f, fmt.Sprintf("%s: prompt not submitted: agent still %s after %d Enter resends", label, f.status, maxSubmitResends))
+	}
+	f.submit.resends++
+	e.log.Warn("prompt not submitted, resending Enter", "job", f.job.ID, "pane", f.job.PaneID, "op", label,
+		"status", f.status, "resend", f.submit.resends)
+	if err := e.conn.SendKeys(ctx, f.job.PaneID, []string{"Enter"}); err != nil {
+		return e.abort(ctx, f, label+": resend Enter: "+err.Error())
+	}
+	e.scheduleSubmitCheck(f)
+	return nil
 }
 
 // await starts the current op's wait; kind none settles at once.
@@ -248,6 +294,10 @@ func (e *Engine) onPaneEvent(ctx context.Context, f *paneFSM, ev herdr.Event) er
 	stale := !ev.ReceivedAt.IsZero() && ev.ReceivedAt.Before(f.armedAt)
 	e.log.Debug("pane status", "job", f.job.ID, "pane", f.job.PaneID, "op", f.current().label, "status", ev.AgentStatus,
 		"wait", w.Kind, "want", w.Status, "left", f.left, "stale", stale, "job_status", f.job.Status)
+	if f.submit != nil && !stale && (ev.AgentStatus == herdr.StatusWorking || ev.AgentStatus == herdr.StatusBlocked) {
+		e.log.Debug("prompt submitted", "job", f.job.ID, "pane", f.job.PaneID, "op", f.current().label, "resends", f.submit.resends)
+		f.stopSubmitCheck()
+	}
 	// Only a fresh arrival at the target settles the op. Anything else, including
 	// a status received before this op's write, stays a recorded event.
 	if w.Kind != recipe.WaitStatus || stale {
@@ -283,8 +333,15 @@ func (e *Engine) onSignal(ctx context.Context, sig signal) error {
 		e.log.Debug("stale signal", "pane", sig.pane, "gen", sig.gen, "tracked", f != nil, "err", sig.err)
 		return nil
 	}
-	e.log.Debug("signal", "job", f.job.ID, "pane", sig.pane, "op", f.current().label, "gen", sig.gen, "err", sig.err)
-	if sig.err != nil {
+	e.log.Debug("signal", "job", f.job.ID, "pane", sig.pane, "op", f.current().label, "gen", sig.gen, "submit", sig.submit, "err", sig.err)
+	switch {
+	case sig.submit:
+		// A busy status may have stopped the check after this signal was posted.
+		if f.submit == nil {
+			return nil
+		}
+		return e.checkSubmit(ctx, f)
+	case sig.err != nil:
 		return e.abort(ctx, f, f.current().label+": wait output: "+sig.err.Error())
 	}
 	return e.stepDone(ctx, f)
@@ -370,6 +427,7 @@ func (e *Engine) drop(f *paneFSM) {
 	if f.timer != nil {
 		f.timer.Stop()
 	}
+	f.stopSubmitCheck()
 }
 
 func fileExists(path string) bool {

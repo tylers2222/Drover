@@ -103,6 +103,7 @@ func cmdRun(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	stepTimeout := fs.Duration("step-timeout", recipe.DefaultStepTimeout, "step wait timeout when the recipe sets none")
 	readyTimeout := fs.Duration("ready-timeout", recipe.DefaultReadyTimeout, "spawn ready timeout when the recipe sets none")
 	tick := fs.Duration("tick", engine.DefaultSafetyTick, "safety interval to re-check decisions and panes")
+	submitCheck := fs.Duration("submit-check", engine.DefaultSubmitCheck, "how long an ask may show no busy status before Enter is resent")
 	debug := fs.Bool("debug", false, "log every herdr request, event and FSM step")
 	if _, err := parseArgs(fs, args, 0); err != nil {
 		return err
@@ -122,6 +123,8 @@ func cmdRun(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		return badUsage(fs, "-ready-timeout must be positive, got %v", *readyTimeout)
 	case *tick <= 0:
 		return badUsage(fs, "-tick must be positive, got %v", *tick)
+	case *submitCheck <= 0:
+		return badUsage(fs, "-submit-check must be positive, got %v", *submitCheck)
 	}
 	if *parent == "" {
 		*parent = *orch
@@ -160,6 +163,7 @@ func cmdRun(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		ReadyTimeout: *readyTimeout,
 		StepTimeout:  *stepTimeout,
 		SafetyTick:   *tick,
+		SubmitCheck:  *submitCheck,
 		MaxAttempts:  *maxAttempts,
 	}, conn, st).Run(ctx)
 	if errors.Is(err, context.Canceled) && ctx.Err() != nil {

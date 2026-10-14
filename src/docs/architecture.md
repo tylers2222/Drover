@@ -152,6 +152,11 @@ Sources: `engine/fsm.go` (`compile`, `arm`, `await`, `send`, `waitOutput`,
   (`ReceivedAt < armedAt`) are ignored; the pane must leave the target status
   then return to it, unless resuming an orphan pane whose result file already
   exists.
+- An `ask` (not a slash command) must show it started a turn: herdr can report
+  an agent idle before its input accepts Enter, leaving the prompt typed but
+  unsent. If no fresh `working` or `blocked` status arrives within
+  `-submit-check` (20s), Enter is resent (`pane.send_keys`); after 3 resends
+  with no turn the attempt fails with `step N: prompt not submitted`.
 - Timeouts: per-wait `timeout`, else `-ready-timeout` (2m) for op 0 and
   `-step-timeout` (30m) for ops ≥ 1, resolved once in `compile`. Checked on
   each `-tick` (30s), so granularity is the tick.
@@ -340,5 +345,5 @@ All via `retry` engine.go: `Attempts++`, clear pane/step; `queued` while
 | "`blocked` holds its pane and slot" | Status-driven blocked holds both. Report-driven blocked keeps the pane but releases the slot and is never resumed. |
 | Diagram: `drover decide` → `drover run` | `decide` writes SQLite only; engine reads on next event/tick. |
 | Spawn is "pane.split / run" | `pane.split` right of `-parent`, or `workspace.create` when `spawn.workspace = true`; then `pane.send_input`. |
-| CLI table | Omits `-parent`, `-results`, `-max-attempts`, `-step-timeout`, `-ready-timeout`, `-tick`, `-socket`. `Config.DecisionPrompt` has no flag. |
+| CLI table | Omits `-parent`, `-results`, `-max-attempts`, `-step-timeout`, `-ready-timeout`, `-tick`, `-submit-check`, `-socket`. `Config.DecisionPrompt` has no flag. |
 | "Run inside a herdr pane (HERDR_ENV=1)" | Only `doctor` warns; `run` works from any process that can reach the socket. |

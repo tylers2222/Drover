@@ -77,7 +77,8 @@ orchestrator pane (LLM, talks to the human)
 }
 ```
 
-`send`: `ask` (agent.prompt, starts a turn) · `text` (literal, no Enter) ·
+`send`: `ask` (agent.prompt, starts a turn; Enter is resent up to 3 times if no
+turn starts within `-submit-check`) · `text` (literal, no Enter) ·
 `keys` · `steer` (one key). `wait`: `none` · `settle` · `status` · `output`
 (anchor the regex; the scrollback echoes the command).
 

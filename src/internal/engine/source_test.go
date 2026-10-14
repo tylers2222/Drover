@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tylers2222/drover/internal/herdr"
 	"github.com/tylers2222/drover/internal/recipe"
@@ -181,7 +182,7 @@ func newTestEngine(t *testing.T, jsonl string) (*Engine, *fakeConn, store.Store)
 	if err := st.Enqueue(ctx, jobs); err != nil {
 		t.Fatal(err)
 	}
-	conn := &fakeConn{prompts: map[string]int{}}
+	conn := &fakeConn{prompts: map[string]int{}, statuses: make(chan herdr.AgentStatus, 16)}
 	e := New(Config{
 		Slots:        1,
 		Orchestrator: orchestratorPane,
@@ -189,6 +190,7 @@ func newTestEngine(t *testing.T, jsonl string) (*Engine, *fakeConn, store.Store)
 		ResultDir:    t.TempDir(),
 		ReadyTimeout: recipe.DefaultReadyTimeout,
 		StepTimeout:  recipe.DefaultStepTimeout,
+		SubmitCheck:  20 * time.Millisecond,
 		MaxAttempts:  store.DefaultMaxAttempts,
 	}, conn, st)
 	// An idle orchestrator takes any ask at once, so a wrongly opened decision
@@ -197,15 +199,22 @@ func newTestEngine(t *testing.T, jsonl string) (*Engine, *fakeConn, store.Store)
 	return e, conn, st
 }
 
-// fakeConn implements the herdr calls a dispatch makes; any other call panics
-// on the nil embedded Conn.
+// fakeConn implements the herdr calls a job makes; any other call panics on
+// the nil embedded Conn. The child pane models omp's input box: a prompt is
+// typed, and only an Enter that is not dropped submits it and turns the agent
+// working, which the fake reports on statuses.
 type fakeConn struct {
 	herdr.Conn
 
-	mu       sync.Mutex
-	split    herdr.SplitParams
-	commands []string
-	prompts  map[string]int
+	mu         sync.Mutex
+	split      herdr.SplitParams
+	commands   []string
+	prompts    map[string]int
+	dropEnters int
+	input      string
+	keys       []string
+	closed     []string
+	statuses   chan herdr.AgentStatus
 }
 
 func (c *fakeConn) SplitPane(_ context.Context, p herdr.SplitParams) (herdr.PaneInfo, error) {
@@ -222,11 +231,47 @@ func (c *fakeConn) RunCommand(_ context.Context, _, command string) error {
 	return nil
 }
 
-func (c *fakeConn) Prompt(_ context.Context, target, _ string) (herdr.PaneInfo, error) {
+func (c *fakeConn) Prompt(_ context.Context, target, text string) (herdr.PaneInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.prompts[target]++
-	return herdr.PaneInfo{PaneID: target, AgentStatus: herdr.StatusWorking}, nil
+	if target != childPane {
+		return herdr.PaneInfo{PaneID: target, AgentStatus: herdr.StatusWorking}, nil
+	}
+	c.input = text
+	c.enter()
+	return herdr.PaneInfo{PaneID: target, AgentStatus: herdr.StatusIdle}, nil
+}
+
+func (c *fakeConn) SendKeys(_ context.Context, _ string, keys []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, k := range keys {
+		c.keys = append(c.keys, k)
+		if k == "Enter" {
+			c.enter()
+		}
+	}
+	return nil
+}
+
+// enter runs with c.mu held.
+func (c *fakeConn) enter() {
+	switch {
+	case c.input == "":
+	case c.dropEnters > 0:
+		c.dropEnters--
+	default:
+		c.input = ""
+		c.statuses <- herdr.StatusWorking
+	}
+}
+
+func (c *fakeConn) ClosePane(_ context.Context, pane string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = append(c.closed, pane)
+	return nil
 }
 
 func (c *fakeConn) Subscribe(ctx context.Context, _ []herdr.Subscription) (<-chan herdr.Event, error) {

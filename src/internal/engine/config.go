@@ -6,8 +6,9 @@ import "time"
 
 // Callers' defaults for Slots and SafetyTick; the engine applies none itself.
 const (
-	DefaultSlots      = 2
-	DefaultSafetyTick = 30 * time.Second
+	DefaultSlots       = 2
+	DefaultSafetyTick  = 30 * time.Second
+	DefaultSubmitCheck = 20 * time.Second
 )
 
 // Orchestrator is the pane asked for recipes. Source is exec'd (sh -c) when
@@ -23,5 +24,6 @@ type Config struct {
 	ReadyTimeout   time.Duration
 	StepTimeout    time.Duration
 	SafetyTick     time.Duration
+	SubmitCheck    time.Duration // how long an ask may stay unsubmitted before Enter is resent
 	MaxAttempts    int
 }

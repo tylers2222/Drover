@@ -30,9 +30,10 @@ type Engine struct {
 
 // A signal whose gen is not its FSM's current gen belongs to an earlier arm.
 type signal struct {
-	pane string
-	gen  int
-	err  error
+	pane   string
+	gen    int
+	submit bool // an ask's submit check is due
+	err    error
 }
 
 func New(cfg Config, conn herdr.Conn, st store.Store) *Engine {

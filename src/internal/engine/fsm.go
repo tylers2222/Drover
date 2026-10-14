@@ -161,7 +161,7 @@ func (e *Engine) resume(ctx context.Context, job *store.Job, p herdr.PaneInfo) e
 	// Resuming at the target is ambiguous (it may predate the write) unless the
 	// last op's report is on disk: then the child ended its final turn.
 	w := &f.current().wait
-	if job.Step == len(f.ops)-1 && w.Kind == recipe.WaitStatus && f.status == w.Status && fileExists(job.ResultPath) {
+	if job.Step == len(f.ops)-1 && w.Kind == recipe.WaitStatus && f.status.Satisfies(w.Status) && fileExists(job.ResultPath) {
 		return e.stepDone(ctx, f)
 	}
 	return e.await(ctx, f)
@@ -210,7 +210,7 @@ func (e *Engine) await(ctx context.Context, f *paneFSM) error {
 		sig := signal{pane: f.job.PaneID, gen: f.gen}
 		f.timer = time.AfterFunc(o.wait.Settle.Std(), func() { e.post(f.ctx, sig) })
 	case recipe.WaitStatus:
-		f.left = f.status != o.wait.Status
+		f.left = !f.status.Satisfies(o.wait.Status)
 	case recipe.WaitOutput:
 		go e.waitOutput(f.ctx, signal{pane: f.job.PaneID, gen: f.gen}, o.wait.Regex, o.timeout)
 	}
@@ -254,7 +254,7 @@ func (e *Engine) onPaneEvent(ctx context.Context, f *paneFSM, ev herdr.Event) er
 		return nil
 	}
 	switch {
-	case ev.AgentStatus != w.Status:
+	case !ev.AgentStatus.Satisfies(w.Status):
 		f.left = true
 	case f.left:
 		return e.stepDone(ctx, f)

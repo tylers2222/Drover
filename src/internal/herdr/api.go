@@ -19,6 +19,15 @@ const (
 	StatusUnknown AgentStatus = "unknown"
 )
 
+// Ready: idle and done both mean the agent takes input. herdr reports a finished
+// turn as done while its pane is unseen (an unfocused workspace) and idle once seen.
+func (s AgentStatus) Ready() bool { return s == StatusIdle || s == StatusDone }
+
+// Satisfies reports whether s ends a wait for want; idle and done are one state for waits.
+func (s AgentStatus) Satisfies(want AgentStatus) bool {
+	return s == want || s.Ready() && want.Ready()
+}
+
 type PaneInfo struct {
 	PaneID         string      `json:"pane_id"`
 	WorkspaceID    string      `json:"workspace_id"`

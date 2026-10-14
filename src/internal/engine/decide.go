@@ -34,7 +34,7 @@ func (o *orchestrator) observe(s herdr.AgentStatus) {
 }
 
 func (o *orchestrator) available() bool {
-	return o.status == herdr.StatusIdle || o.status == herdr.StatusDone
+	return o.status.Ready()
 }
 
 // rejected, when set, is why the job's previous recipe failed validation.

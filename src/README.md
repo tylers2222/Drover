@@ -54,9 +54,9 @@ orchestrator pane (LLM, talks to the human)
 1. Orchestrator (a pane) starts `drover run -orchestrator <its pane id>`.
 2. Jobs arrive via `drover enqueue jobs.jsonl` or `-source <cmd>` (exec'd when
    the queue is empty; prints JSONL).
-3. Engine claims a job (`queued → deciding`). Cached recipe for the job's
-   class → start. Miss → creates a decision row and, when the orchestrator is
-   idle, prompts it once.
+3. Engine claims a job (`queued → deciding`). Recipe on the job, else cached
+   recipe for the job's class → start. Miss → creates a decision row and, when
+   the orchestrator is idle, prompts it once.
 4. Orchestrator answers with `drover decide <id> recipe.json`.
 5. Engine spawns the pane with `HERD_JOB_ID` / `HERD_RESULT` in env, runs the
    recipe's steps, validates the report, closes the pane, releases the slot.
@@ -80,6 +80,28 @@ orchestrator pane (LLM, talks to the human)
 `send`: `ask` (agent.prompt, starts a turn) · `text` (literal, no Enter) ·
 `keys` · `steer` (one key). `wait`: `none` · `settle` · `status` · `output`
 (anchor the regex; the scrollback echoes the command).
+
+## Enqueue
+
+One job per line. Only `id`, `class`, `title`, `spec`, `max_attempts` and
+`recipe` are accepted; every field is optional.
+
+```json
+{"id": "j1", "class": "implement", "title": "parse.ts", "spec": {"file": "src/parse.ts"},
+ "max_attempts": 3, "recipe": {"spawn": {"command": "omp"}, "steps": [...]}}
+```
+
+`recipe` takes the same object as the Recipe section above and goes through
+the same validation as `drover decide`. An invalid recipe rejects the whole
+batch with the line number and the reason, and nothing is enqueued. A valid one
+is stored in `jobs.recipe`. A job with an inline recipe never prompts the
+orchestrator and never writes `class_recipes`. Omit `recipe` (or set it to
+`null`) to use the class recipe or ask the orchestrator. `-source` output uses
+the same format.
+
+`drover run` still needs `-orchestrator`. If every job carries a recipe, that
+pane is never prompted, so it can be any pane, such as the shell that runs
+drover.
 
 ## Result
 
